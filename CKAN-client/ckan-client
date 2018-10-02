@@ -1,0 +1,1238 @@
+#!/usr/bin/env perl
+
+# CoeGSS
+# Piotr Dzierżak pdzierzak@icis.pcz.pl PSNC
+
+use strict;
+use warnings;
+use utf8;
+use Text::Unidecode;
+use charnames ':full';
+binmode(STDOUT, ':utf8');
+use URI::Escape;
+use HTTP::Response;
+use Config::IniFiles;
+use JSON;
+use Try::Tiny;
+use File::Fetch;
+use File::Spec;
+use File::Basename;
+use Text::CSV;
+use WWW::Curl::Easy;
+use WWW::Curl::Form;
+use Switch;
+
+my $startTime = time();
+
+## functions ##
+sub saveFileFromUrl {
+    if(@_ < 2) {
+        print("URL and DIR parameters are required!\n");
+        return;
+    }
+
+    my $url = $_[0];
+    my $dir = $_[1];
+
+    my $absDirPath = File::Spec->rel2abs($dir);
+    if(!-d $absDirPath) {
+        print("Directory ".$absDirPath." not exists, creating ... ");
+        mkdir($absDirPath);
+        print("OK\n");
+    }
+
+    try {
+        print("Downloading ".$url." to directory ".$absDirPath." ... ");
+        system("wget -P $absDirPath $url");
+        print("OK\n");
+    }
+    catch {
+        warn ("ERROR\n");
+    }
+}
+
+sub parseCsvFile {
+    if(@_ < 3) {
+        print("CSV file parameter is required!\n");
+        return;
+    }
+
+    my $auth = $_[0];
+    my $dataset = $_[1];
+    my $filePath = $_[2] or die "Need to get CSV file on the command line\n";
+
+
+    my $csv = Text::CSV->new({ sep_char => ',', binary => 1 });
+    my $fileName = basename($filePath);
+
+    open(my $file, '<:encoding(utf8)', $filePath) or die "Could not open '$filePath' $!\n";
+    my $hr = $csv->getline ($file);
+    my $lk = scalar(@$hr);
+    my $hStr = '';
+    for (my $i = 0; $i < $lk; $i = $i + 1){
+        $hStr = $hStr.'{"id" : "'.@$hr[$i].'"}';
+        if($i < $lk - 1) {
+            $hStr = $hStr.', ';
+        }
+    }
+
+    my $dirname = dirname(__FILE__);
+    my $resourceId = '';
+    if(my $row = $csv->getline ($file)) {
+        if(scalar(@$row) eq $lk) {
+            my $firstRowData = '{';
+            for (my $i = 0; $i < $lk; $i = $i + 1) {
+                $firstRowData .= '"'.@$hr[$i].'" : "'.@$row[$i].'"';
+                if($i < $lk - 1) {
+                    $firstRowData .= ', ';
+                }
+            }
+            $firstRowData .= '}';
+            $resourceId = createDatastore($auth, $fileName, $dataset, $hStr, $firstRowData);
+        }
+    }
+
+    my $c = 0;
+    my $sumRowData = '';
+    while(my $row = $csv->getline ($file)) {
+        if(scalar(@$row) eq $lk) {
+            my $otherRowData = '{';
+            for (my $i = 0; $i < $lk; $i = $i + 1) {
+                $otherRowData .= '"'.@$hr[$i].'" : "'.@$row[$i].'"';
+                if($i < $lk - 1) {
+                    $otherRowData = $otherRowData.', ';
+                }
+            }
+            $otherRowData .= '}';
+
+            if($c > 0) {
+                $sumRowData .= ', ';
+            }
+            $sumRowData .= $otherRowData;
+            $c += 1;
+
+            if($c eq 9999) {
+                $c = 0;
+                insertToDatastore($auth, $resourceId, $sumRowData);
+                $sumRowData = '';
+            }
+        }
+    }
+
+    if($c > 0) {
+        insertToDatastore($auth, $resourceId, $sumRowData);
+        $sumRowData = '';
+    }
+
+    close $file;
+}
+
+sub getServer {
+    my $dirname = dirname(__FILE__);
+    my $cfg = Config::IniFiles->new(-file => $dirname."/settings.ini");
+    if($cfg->val('general', 'server')) {
+        return $cfg->val('general', 'server');
+    }
+    else {
+        print "No option [general] server in settings.ini\n";
+        exit;
+    }
+}
+
+sub createDatastore {
+    if (@_ < 5) {
+        print("Use: createDatastore (<auth_key> <name> <dataset_name> <fields> <record(s)>)\n");
+        exit();
+    }
+
+    my $auth = $_[0];
+    my $name = $_[1];
+    my $dataset = $_[2];
+    my $fields = $_[3];
+    my $records = $_[4];
+
+    my $url = getServer()."/api/3/action/datastore_create";
+    my $curl = WWW::Curl::Easy->new();
+    $curl->setopt(CURLOPT_POST, 1);
+    $curl->setopt(CURLOPT_HTTPHEADER, ['Authorization: '.$auth, 'User-Agent: PERL/CURL Client']);
+    my $inJson = '{"resource": {"package_id": "'.$dataset.'", "name" : "'.$name.'"}, "fields": [ '.$fields.' ], "records": [ '.$records.' ]}';
+    my $inJsonEnc = uri_escape_utf8($inJson);
+    $curl->setopt(CURLOPT_POSTFIELDS, $inJsonEnc);
+
+    $curl->setopt(CURLOPT_HEADER, 1);
+    $curl->setopt(CURLOPT_VERBOSE, 0);
+    $curl->setopt(CURLOPT_NOPROGRESS, 1);
+    $curl->setopt(CURLOPT_NOBODY, 0);
+    $curl->setopt(CURLOPT_SSL_VERIFYPEER, 0);
+    $curl->setopt(CURLOPT_SSL_VERIFYHOST, 0);
+    $curl->setopt(CURLOPT_URL, $url);
+
+    my $response_body;
+    $curl->setopt(CURLOPT_WRITEDATA,\$response_body);
+
+    my $retcode = $curl->perform;
+
+    if ($retcode == 0) {
+        my $jsonObj;
+
+        try {
+            print("Connect to CKAN ... ");
+            my $response_code = $curl->getinfo(CURLINFO_HTTP_CODE);
+            my $response = HTTP::Response->parse($response_body);
+            my $responseStr = $response->decoded_content;
+            my $jsonStr = '{}';
+            if ($responseStr =~ /{(.*)}/) {
+                my $jsonStrPart;
+                ($jsonStrPart) = $responseStr =~ /{(.*)}/;
+                ($jsonStr) = '{'.$jsonStrPart.'}';
+            }
+            else {
+                print("ERROR - NO JSON DATA\n");
+                exit();
+            }
+
+            $jsonObj = JSON->new->utf8->decode($jsonStr);
+            my $success = $jsonObj->{success};
+            if($success == 1) {
+                print("OK\n");
+                return $jsonObj->{result}->{resource_id};
+            }
+            else {
+                my $errorMsg = $jsonObj->{error}->{name}[0];
+                print("ERROR: ".$errorMsg."\n");
+                exit();
+            }
+
+        } catch {
+            warn ("Caught error: $_");
+            exit();
+        };
+
+    }
+    else {
+        print("An unexpected error occurred. Code: $retcode ".$curl->strerror($retcode)." ".$curl->errbuf."\n");
+    }
+}
+
+sub insertToDatastore {
+    if (@_ < 3) {
+        print("Use: insertToDatastore (<auth_key> <resource_id> <record(s)>)\n");
+        exit();
+    }
+
+    my $auth = $_[0];
+    my $resourceId = $_[1];
+    my $records = $_[2];
+
+    my $url = getServer()."/api/3/action/datastore_create";
+    my $curl = WWW::Curl::Easy->new();
+    $curl->setopt(CURLOPT_POST, 1);
+    $curl->setopt(CURLOPT_HTTPHEADER, ['Authorization: '.$auth, 'User-Agent: PERL/CURL Client']);
+    my $inJson = '{"resource_id": "'.$resourceId.'", "method": "insert", "records": ['.$records .']}';
+    my $inJsonEnc = uri_escape_utf8($inJson);
+    $curl->setopt(CURLOPT_POSTFIELDS, $inJsonEnc);
+    $curl->setopt(CURLOPT_HEADER, 1);
+    $curl->setopt(CURLOPT_VERBOSE, 0);
+    $curl->setopt(CURLOPT_NOPROGRESS, 1);
+    $curl->setopt(CURLOPT_NOBODY, 0);
+    $curl->setopt(CURLOPT_SSL_VERIFYPEER, 0);
+    $curl->setopt(CURLOPT_SSL_VERIFYHOST, 0);
+    $curl->setopt(CURLOPT_URL, $url);
+
+    my $response_body;
+    $curl->setopt(CURLOPT_WRITEDATA,\$response_body);
+
+    my $retcode = $curl->perform;
+
+    if ($retcode == 0) {
+        my $jsonObj;
+
+        try {
+            print("Connect to CKAN ... ");
+            my $response_code = $curl->getinfo(CURLINFO_HTTP_CODE);
+            my $response = HTTP::Response->parse($response_body);
+            my $responseStr = $response->decoded_content;
+            my $jsonStr = '{}';
+            if ($responseStr =~ /{(.*)}/) {
+                my $jsonStrPart;
+                ($jsonStrPart) = $responseStr =~ /{(.*)}/;
+                ($jsonStr) = '{'.$jsonStrPart.'}';
+            }
+            else {
+                print("ERROR - NO JSON DATA\n");
+                exit();
+            }
+
+            $jsonObj = JSON->new->utf8->decode($jsonStr);
+            my $success = $jsonObj->{success};
+            if($success == 1) {
+                print("OK\n");
+            }
+            else {
+                my $errorMsg = $jsonObj->{error}->{message}[0];
+                print("ERROR: ".$errorMsg."\n");
+            }
+
+        } catch {
+            warn ("Caught error: $_");
+            exit();
+        };
+
+    }
+    else {
+        print("An unexpected error occurred. Code: $retcode ".$curl->strerror($retcode)." ".$curl->errbuf."\n");
+    }
+}
+## end of functions ##
+
+my $action = "";
+if ($#ARGV > -1) {
+    for (my $i = 0; $i <= $#ARGV; $i++) {
+        if($ARGV[$i] eq "--action") {
+            $action = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+    }
+}
+
+if($action eq '') {
+    print("Select action name:");
+    print("\n\t--action tag-list");
+    print("\n\t--action group-list");
+    print("\n\t--action group-create --auth <auth_key> --name <name> --title <title>");
+    print("\n\t--action group-delete --auth <auth_key> --name <name>");
+    print("\n\t--action group-purge --auth <auth_key> --name <name>");
+    print("\n\t--action organization-list");
+    print("\n\t--action organization-create --auth <auth_key> --name <name> --title <title>");
+    print("\n\t--action organization-delete --auth <auth_key> --name <name>");
+    print("\n\t--action organization-purge --auth <auth_key> --name <name>");
+    print("\n\t--action dataset-list");
+    print("\n\t--action dataset-create --auth <auth_key> --organization <organization_name> --name <name> --title <title> --scenario-id <scenario> --application-id <application> --source <source (s)> --reliability-source <1-5> --license <license>");
+    print("\n\t--action dataset-delete --auth <auth_key> --name <name>");
+    print("\n\t--action dataset-purge --auth <auth_key> --name <name>");
+    print("\n\t--action file-list-dataset --dataset <dataset_name>");
+    print("\n\t--action file-delete-id --auth <auth_key> --id <resource_id>");
+    print("\n\t--action file-delete-dataset --auth <auth_key> --dataset <dataset_name>");
+    print("\n\t--action file-upload-path --auth <auth_key> --dataset <dataset_name> --file <file_path>");
+    print("\n\t--action file-csv-upload-path --auth <auth_key> --dataset <dataset_name> --file <file_path>");
+    print("\n\t--action file-upload-dir --auth <auth_key> --dataset <dataset_name> --dir <dir_path>");
+    print("\n\t--action file-upload-url --auth <auth_key> --dataset <dataset_name> --url <file_url> --resource <resource_name>");
+    print("\n\t--action file-download-id --id <resource_id> --dir <save_dir_path>");
+    print("\n\t--action file-download-url --url <url> --dir <save_dir_path>");
+    print("\n\t--action file-download-dataset --dataset <dataset_name> --dir <save_dir_path>");
+    print("\n\t--action datastore-create --auth <auth_key> --name <name> --dataset <dataset_name> --fields <fields> --records <record(s)>");
+    print("\n\t--action datastore-insert --auth <auth_key> --id <resource_id> --records <record(s)>");
+    print("\n\t--action resource-search-sql --id <resource_id> --fields <fields> --filter <filter> --file <file_path>\n");
+
+    exit();
+}
+
+my $dirname = dirname(__FILE__);
+my $cfg = Config::IniFiles->new(-file => $dirname."/settings.ini");
+my $server = "";
+if($cfg->val('general', 'server')) {
+    $server = $cfg->val('general', 'server');
+}
+else {
+    print "No option [general] server in settings.ini\n";
+    exit;
+}
+
+
+my $curl = WWW::Curl::Easy->new();
+my $form = WWW::Curl::Form->new();
+
+my $url = "";
+
+if ($action eq "tag-list") {
+    $url = $server . "/api/3/action/tag_list";
+}
+elsif ($action eq "organization-list") {
+    if ($#ARGV < 0) {
+        print("Use: ckan-client --action organization-list\n");
+        exit();
+    }
+
+    $url = $server . "/api/3/action/organization_list";
+    $curl->setopt(CURLOPT_POST, 1);
+    $curl->setopt(CURLOPT_HTTPHEADER, ['User-Agent: PERL/CURL Client']);
+    my $inJson = '{"sort": "name"}';
+    my $inJsonEnc = uri_escape_utf8($inJson);
+    $curl->setopt(CURLOPT_POSTFIELDS, $inJsonEnc);
+}
+elsif ($action eq "organization-create") {
+    my $auth = '';
+    my $name = '';
+    my $title = '';
+
+    for (my $i = 0; $i <= $#ARGV; $i++) {
+        if($ARGV[$i] eq "--auth") {
+            $auth = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--name") {
+            $name = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--title") {
+            $title = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+    }
+
+    if ($auth eq '' || $name eq '' || $title eq '') {
+        print("Use: ckan-client --action organization-create --auth <auth_key> --name <name> --title <title>\n");
+        exit();
+    }
+
+    $url = $server . "/api/3/action/organization_create";
+    $curl->setopt(CURLOPT_POST, 1);
+    $curl->setopt(CURLOPT_HTTPHEADER, ['Authorization: '.$auth, 'User-Agent: PERL/CURL Client']);
+    my $inJson = '{"name": "'.$name.'", "title": "'.$title.'"}';
+    my $inJsonEnc = uri_escape_utf8($inJson);
+    $curl->setopt(CURLOPT_POSTFIELDS, $inJsonEnc);
+}
+elsif ($action eq "organization-delete") {
+    my $auth = '';
+    my $name = '';
+
+    for (my $i = 0; $i <= $#ARGV; $i++) {
+        if($ARGV[$i] eq "--auth") {
+            $auth = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--name") {
+            $name = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+    }
+
+    if ($auth eq '' || $name eq '') {
+        print("Use: ckan-client --action organization-delete --auth <auth_key> --name <name>\n");
+        exit();
+    }
+
+    $url = $server . "/api/3/action/organization_delete";
+    $curl->setopt(CURLOPT_POST, 1);
+    $curl->setopt(CURLOPT_HTTPHEADER, ['Authorization: '.$auth, 'User-Agent: PERL/CURL Client']);
+    my $inJson = '{"id": "'.$name.'"}';
+    my $inJsonEnc = uri_escape_utf8($inJson);
+    $curl->setopt(CURLOPT_POSTFIELDS, $inJsonEnc);
+}
+elsif ($action eq "organization-purge") {
+    my $auth = '';
+    my $name = '';
+
+    for (my $i = 0; $i <= $#ARGV; $i++) {
+        if($ARGV[$i] eq "--auth") {
+            $auth = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--name") {
+            $name = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+    }
+
+    if ($auth eq '' || $name eq '') {
+        print("Use: ckan-client --action organization-purge --auth <auth_key> --name <name>\n");
+        exit();
+    }
+
+    $url = $server . "/api/3/action/organization_purge";
+    $curl->setopt(CURLOPT_POST, 1);
+    $curl->setopt(CURLOPT_HTTPHEADER, ['Authorization: '.$auth, 'User-Agent: PERL/CURL Client']);
+    my $inJson = '{"id": "'.$name.'"}';
+    my $inJsonEnc = uri_escape_utf8($inJson);
+    $curl->setopt(CURLOPT_POSTFIELDS, $inJsonEnc);
+}
+elsif ($action eq "group-list") {
+    $url = $server . "/api/3/action/group_list";
+}
+elsif ($action eq "group-create") {
+    my $auth = '';
+    my $name = '';
+    my $title = '';
+
+    for (my $i = 0; $i <= $#ARGV; $i++) {
+        if($ARGV[$i] eq "--auth") {
+            $auth = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--name") {
+            $name = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--title") {
+            $title = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+    }
+
+    if ($auth eq '' || $name eq '' || $title eq '') {
+        print("Use: ckan-client --action group-create --auth <auth_key> --name <name> --title <title>\n");
+        exit();
+    }
+
+    $url = $server . "/api/3/action/group_create";
+    $curl->setopt(CURLOPT_POST, 1);
+    $curl->setopt(CURLOPT_HTTPHEADER, ['Authorization: '.$auth, 'User-Agent: PERL/CURL Client']);
+    my $inJson = '{"name": "'.$name.'", "title": "'.$title.'"}';
+    my $inJsonEnc = uri_escape_utf8($inJson);
+    $curl->setopt(CURLOPT_POSTFIELDS, $inJsonEnc);
+}
+elsif ($action eq "group-delete") {
+    my $auth = '';
+    my $name = '';
+
+    for (my $i = 0; $i <= $#ARGV; $i++) {
+        if($ARGV[$i] eq "--auth") {
+            $auth = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--name") {
+            $name = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+    }
+
+    if ($auth eq '' || $name eq '') {
+        print("Use: ckan-client --action group-delete --auth <auth_key> --name <name>\n");
+        exit();
+    }
+
+    $url = $server . "/api/3/action/group_delete";
+    $curl->setopt(CURLOPT_POST, 1);
+    $curl->setopt(CURLOPT_HTTPHEADER, ['Authorization: '.$auth, 'User-Agent: PERL/CURL Client']);
+    my $inJson = '{"id": "'.$name.'"}';
+    my $inJsonEnc = uri_escape_utf8($inJson);
+    $curl->setopt(CURLOPT_POSTFIELDS, $inJsonEnc);
+}
+elsif ($action eq "group-purge") {
+    my $auth = '';
+    my $name = '';
+
+    for (my $i = 0; $i <= $#ARGV; $i++) {
+        if($ARGV[$i] eq "--auth") {
+            $auth = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--name") {
+            $name = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+    }
+
+    if ($auth eq '' || $name eq '') {
+        print("Use: ckan-client --action group-purge --auth <auth_key> --name <name>\n");
+        exit();
+    }
+
+    $url = $server . "/api/3/action/group_purge";
+    $curl->setopt(CURLOPT_POST, 1);
+    $curl->setopt(CURLOPT_HTTPHEADER, ['Authorization: '.$auth, 'User-Agent: PERL/CURL Client']);
+    my $inJson = '{"id": "'.$name.'"}';
+    my $inJsonEnc = uri_escape_utf8($inJson);
+    $curl->setopt(CURLOPT_POSTFIELDS, $inJsonEnc);
+}
+elsif ($action eq "dataset-list") {
+    $url = $server . "/api/3/action/package_list";
+}
+elsif ($action eq "dataset-create") {
+    my $auth = '';
+    my $org = '';
+    my $name = '';
+    my $title = '';
+    my $scenarioId = '', my $applicationId = '', my $source = '', my $license = '', my $reliabilitySource = '';
+
+    for (my $i = 0; $i <= $#ARGV; $i++) {
+        if($ARGV[$i] eq "--auth") {
+            $auth = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--organization") {
+            $org = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--name") {
+            $name = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--title") {
+            $title = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--scenario-id") {
+            $scenarioId = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--application-id") {
+            $applicationId = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--source") {
+            $source = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--license") {
+            $license = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--reliability-source") {
+            $reliabilitySource = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+    }
+
+    if ($auth eq '' || $org eq '' || $name eq '' || $title eq '') {
+        print("Use: ckan-client --action dataset-create --auth <auth_key> --organization <organization_name> --name <name> --title <title> --scenario-id <scenario> --application-id <application> --source-type <1-5> --file-structure <1-5> --reliability-source <1-4>\n");
+        exit();
+    }
+
+    switch($reliabilitySource) {
+        case 1 { $reliabilitySource = 'Survey' }
+        case 2 { $reliabilitySource = 'Census' }
+        case 3 { $reliabilitySource = 'Simulation' }
+        case 4 { $reliabilitySource = 'Extrapolation' }
+        case 5 { $reliabilitySource = 'Other' }
+        else {
+            if($reliabilitySource ne '') {
+                print("The parameter --reliability-source can take the following values [1-5]:\n");
+                print("1 - Survey\n");
+                print("2 - Census\n");
+                print("3 - Simulation\n");
+                print("4 - Extrapolation\n");
+                print("5 - Other\n");
+                exit();
+            }
+        }
+    }
+
+    $url = $server . "/api/3/action/package_create";
+    $curl->setopt(CURLOPT_POST, 1);
+    $curl->setopt(CURLOPT_HTTPHEADER, ['Authorization: '.$auth, 'User-Agent: PERL/CURL Client']);
+    my $inJson = '{"owner_org": "'.$org.'", "name": "'.$name.'", "title": "'.$title.'", "scenario_id": "'.$scenarioId.'", "application_id": "'.$applicationId.'", "source": "'.$source.'", "license": "'.$license.'", "reliability_source": "'.$reliabilitySource.'"}';
+    my $inJsonEnc = uri_escape_utf8($inJson);
+    $curl->setopt(CURLOPT_POSTFIELDS, $inJsonEnc);
+}
+elsif ($action eq "dataset-delete") {
+    my $auth = '';
+    my $name = '';
+
+    for (my $i = 0; $i <= $#ARGV; $i++) {
+        if($ARGV[$i] eq "--auth") {
+            $auth = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--name") {
+            $name = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+    }
+
+    if ($auth eq '' || $name eq '') {
+        print("Use: ckan-client --action dataset-delete --auth <auth_key> --name <name>\n");
+        exit();
+    }
+
+    $url = $server . "/api/3/action/package_delete";
+    $curl->setopt(CURLOPT_POST, 1);
+    $curl->setopt(CURLOPT_HTTPHEADER, ['Authorization: '.$auth, 'User-Agent: PERL/CURL Client']);
+    my $inJson = '{"id": "'.$name.'"}';
+    my $inJsonEnc = uri_escape_utf8($inJson);
+    $curl->setopt(CURLOPT_POSTFIELDS, $inJsonEnc);
+}
+elsif ($action eq "dataset-purge") {
+    my $auth = '';
+    my $name = '';
+
+    for (my $i = 0; $i <= $#ARGV; $i++) {
+        if($ARGV[$i] eq "--auth") {
+            $auth = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--name") {
+            $name = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+    }
+
+    if ($auth eq '' || $name eq '') {
+        print("Use: ckan-client --action dataset-purge --auth <auth_key> --name <name>\n");
+        exit();
+    }
+
+    $url = $server . "/api/3/action/dataset_purge";
+    $curl->setopt(CURLOPT_POST, 1);
+    $curl->setopt(CURLOPT_HTTPHEADER, ['Authorization: '.$auth, 'User-Agent: PERL/CURL Client']);
+    my $inJson = '{"id": "'.$name.'"}';
+    my $inJsonEnc = uri_escape_utf8($inJson);
+    $curl->setopt(CURLOPT_POSTFIELDS, $inJsonEnc);
+}
+elsif ($action eq "datastore-create") {
+    my $auth = '';
+    my $name = '';
+    my $dataset = '';
+    my $fields = '';
+    my $records = '';
+
+    for (my $i = 0; $i <= $#ARGV; $i++) {
+        if($ARGV[$i] eq "--auth") {
+            $auth = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--name") {
+            $name = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--dataset") {
+            $dataset = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--fields") {
+            $fields = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--records") {
+            $records = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+    }
+
+    if ($auth eq '' || $name eq '' || $dataset eq '' || $fields eq '' || $records eq '') {
+        print("Use: ckan-client --action datastore-create --auth <auth_key> --name <name> --dataset <dataset_name> --fields <fields> --records <record(s)>\n");
+        exit();
+    }
+
+    my $resourceId = createDatastore($auth, $name, $dataset, $fields, $records);
+    print "$resourceId\n";
+}
+elsif ($action eq "datastore-insert") {
+    my $auth = $ARGV[1];
+    my $id = $ARGV[2];
+    my $records = $ARGV[3];
+
+
+    for (my $i = 0; $i <= $#ARGV; $i++) {
+        if($ARGV[$i] eq "--auth") {
+            $auth = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--id") {
+            $id = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--records") {
+            $records = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+    }
+
+    if ($auth eq '' || $id eq '' || $records eq '') {
+        print("Use: ckan-client --action datastore-insert --auth <auth_key> --id <resource_id> --records <record(s)>\n");
+        exit();
+    }
+
+    insertToDatastore($auth, $id, $records);
+}
+elsif ($action eq "file-delete-id") {
+    my $auth = '';
+    my $resourceId = '';
+
+    for (my $i = 0; $i <= $#ARGV; $i++) {
+        if($ARGV[$i] eq "--auth") {
+            $auth = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--id") {
+            $resourceId = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+    }
+
+    if ($auth eq '' || $resourceId eq '') {
+        print("Use: ckan-client --action file-delete-id --auth <auth_key> --id <resource_id>\n");
+        exit();
+    }
+
+    $url = $server . "/api/3/action/resource_delete";
+    $curl->setopt(CURLOPT_POST, 1);
+    $curl->setopt(CURLOPT_HTTPHEADER, ['Authorization: '.$auth, 'User-Agent: PERL/CURL Client']);
+    my $inJson = '{"id": "'.$resourceId.'"}';
+    my $inJsonEnc = uri_escape_utf8($inJson);
+    $curl->setopt(CURLOPT_POSTFIELDS, $inJsonEnc);
+}
+elsif ($action eq "file-delete-dataset") {
+    my $auth = '';
+    my $dataset = '';
+
+    for (my $i = 0; $i <= $#ARGV; $i++) {
+        if($ARGV[$i] eq "--auth") {
+            $auth = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--dataset") {
+            $dataset = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+    }
+
+    if ($auth eq '' || $dataset eq '') {
+        print("Use: ckan-client --action file-delete-dataset --auth <auth_key> --dataset <dataset_name>\n");
+        exit();
+    }
+
+    $url = $server . "/api/3/action/package_show";
+    $curl->setopt(CURLOPT_POST, 1);
+    $curl->setopt(CURLOPT_HTTPHEADER, ['User-Agent: PERL/CURL Client']);
+    my $inJson = '{"id": "'.$dataset.'"}';
+    my $inJsonEnc = uri_escape_utf8($inJson);
+    $curl->setopt(CURLOPT_POSTFIELDS, $inJsonEnc);
+}
+elsif ($action eq "file-upload-path") {
+    my $auth = '';
+    my $dataset = '';
+    my $file = '';
+
+    for (my $i = 0; $i <= $#ARGV; $i++) {
+        if($ARGV[$i] eq "--auth") {
+            $auth = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--dataset") {
+            $dataset = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--file") {
+            $file = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+    }
+
+    if ($auth eq '' || $dataset eq '' || $file eq '') {
+        print("Use: ckan-client --action file-upload-path --auth <auth_key> --dataset <dataset_name> --file <file_path>\n");
+        exit();
+    }
+
+    my $absFilePath = File::Spec->rel2abs($file);
+    my $fileName = basename($absFilePath);
+
+    if(!-e $file) {
+        print("File ".$absFilePath." does not exist!\n");
+        exit();
+    }
+
+    $url = $server . "/api/3/action/resource_create";
+    $curl->setopt(CURLOPT_POST, 1);
+    $curl->setopt(CURLOPT_HTTPHEADER, ['Authorization: '.$auth, 'User-Agent: PERL/CURL Client']);
+    $form->formadd('package_id', $dataset);
+    $form->formadd('name', $fileName);
+    $form->formadd('url', 'url');
+    $form->formaddfile($absFilePath, 'upload', '');
+    $curl->setopt(CURLOPT_HTTPPOST, $form);
+}
+elsif ($action eq "file-csv-upload-path") {
+    my $auth = '';
+    my $dataset = '';
+    my $file = '';
+
+    for (my $i = 0; $i <= $#ARGV; $i++) {
+        if($ARGV[$i] eq "--auth") {
+            $auth = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--dataset") {
+            $dataset = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--file") {
+            $file = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+    }
+
+    if ($auth eq '' || $dataset eq '' || $file eq '') {
+        print("Use: ckan-client --action file-csv-upload-path --auth <auth_key> --dataset <dataset_name> --file <file_path>\n");
+        exit();
+    }
+
+    my $absFilePath = File::Spec->rel2abs($file);
+
+    if(!-e $file) {
+        print("File ".$absFilePath." does not exist!\n");
+        exit();
+    }
+
+    parseCsvFile($auth, $dataset, $absFilePath);
+}
+elsif ($action eq "file-upload-url") {
+    my $auth = '';
+    my $dataset = '';
+    my $urlFile = '';
+    my $name = '';
+
+    for (my $i = 0; $i <= $#ARGV; $i++) {
+        if($ARGV[$i] eq "--auth") {
+            $auth = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--dataset") {
+            $dataset = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--url") {
+            $urlFile = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--resource") {
+            $name = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+    }
+
+    if ($auth eq '' || $dataset eq '' || $urlFile eq '' || $name eq '') {
+        print("Use: ckan-client --action file-upload-url --auth <auth_key> --dataset <dataset_name> --url <file_url> --resource <resource_name>\n");
+        exit();
+    }
+
+    $url = $server . "/api/3/action/resource_create";
+    $curl->setopt(CURLOPT_POST, 1);
+    $curl->setopt(CURLOPT_HTTPHEADER, ['Authorization: '.$auth, 'User-Agent: PERL/CURL Client']);
+    my $inJson = '{"package_id": "'.$dataset.'", "name": "'.$name.'",  "url": "'.$urlFile.'"}';
+    my $inJsonEnc = uri_escape_utf8($inJson);
+    $curl->setopt(CURLOPT_HTTPPOST, $form);
+    $curl->setopt(CURLOPT_POSTFIELDS, $inJsonEnc);
+}
+elsif($action eq "file-upload-dir") {
+    my $auth = '';
+    my $dataset = '';
+    my $dir = '';
+
+    for (my $i = 0; $i <= $#ARGV; $i++) {
+        if($ARGV[$i] eq "--auth") {
+            $auth = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--dataset") {
+            $dataset = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--dir") {
+            $dir = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+    }
+
+    if ($auth eq '' || $dataset eq '' || $dir eq '') {
+        print("Use: ckan-client --action file-upload-dir --auth <auth_key> --dataset <dataset_name> --dir <dir_path>\n");
+        exit();
+    }
+
+    if(-d $dir) {
+        opendir(DH, $dir);
+        my @files = readdir(DH);
+        closedir(DH);
+
+        foreach my $file (@files) {
+            if($file ne "." && $file ne "..") {
+                my $absFilePath = File::Spec->rel2abs($dir.$file);
+                print("Uploading ".$absFilePath." ... ");
+                system($dirname.'/ckan-client --action file-upload-path --auth '.$auth.' --dataset '.$dataset.' --file '.$absFilePath);
+            }
+        }
+    }
+    else {
+        print("Directory ".$dir." does not extst!\n");
+        exit();
+    }
+}
+elsif ($action eq "file-download-id") {
+    my $id = '';
+    my $dir = '';
+
+    for (my $i = 0; $i <= $#ARGV; $i++) {
+        if($ARGV[$i] eq "--id") {
+            $id = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--dir") {
+            $dir = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+    }
+
+    if ($id eq '' || $dir eq '') {
+        print("Use: ckan-client --action file-download-id --dataset <dataset_name> --dir <save_dir_path>\n");
+        exit();
+    }
+
+    $url = $server . "/api/3/action/resource_show";
+    $curl->setopt(CURLOPT_POST, 1);
+    $curl->setopt(CURLOPT_HTTPHEADER, ['User-Agent: PERL/CURL Client']);
+    my $inJson = '{"id": "'.$id.'"}';
+    my $inJsonEnc = uri_escape_utf8($inJson);
+    $curl->setopt(CURLOPT_POSTFIELDS, $inJsonEnc);
+}
+elsif ($action eq "file-download-dataset") {
+    my $dataset = '';
+    my $dir = '';
+
+    for (my $i = 0; $i <= $#ARGV; $i++) {
+        if($ARGV[$i] eq "--dataset") {
+            $dataset = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--dir") {
+            $dir = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+    }
+
+    if ($dataset eq '' || $dir eq '') {
+        print("Use: ckan-client --action file-download-dataset --dataset <dataset_name> --dir <save_dir_path>\n");
+        exit();
+    }
+
+    $url = $server . "/api/3/action/package_show";
+    $curl->setopt(CURLOPT_POST, 1);
+    $curl->setopt(CURLOPT_HTTPHEADER, ['User-Agent: PERL/CURL Client']);
+    my $inJson = '{"id": "'.$dataset.'"}';
+    my $inJsonEnc = uri_escape_utf8($inJson);
+    $curl->setopt(CURLOPT_POSTFIELDS, $inJsonEnc);
+}
+elsif ($action eq "file-list-dataset") {
+    my $dataset = '';
+
+    for (my $i = 0; $i <= $#ARGV; $i++) {
+        if($ARGV[$i] eq "--dataset") {
+            $dataset = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+    }
+
+    if ($dataset eq '') {
+        print("Use: ckan-client --action file-list-dataset --dataset <dataset_name>\n");
+        exit();
+    }
+
+    $url = $server . "/api/3/action/package_show";
+    $curl->setopt(CURLOPT_POST, 1);
+    $curl->setopt(CURLOPT_HTTPHEADER, ['User-Agent: PERL/CURL Client']);
+    my $inJson = '{"id": "'.$dataset.'"}';
+    my $inJsonEnc = uri_escape_utf8($inJson);
+    $curl->setopt(CURLOPT_POSTFIELDS, $inJsonEnc);
+}
+elsif ($action eq "file-download-url") {
+    my $urlFile = '';
+    my $dir = '';
+
+    for (my $i = 0; $i <= $#ARGV; $i++) {
+        if($ARGV[$i] eq "--url") {
+            $urlFile = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--dir") {
+            $dir = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+    }
+
+    if ($urlFile eq '' || $dir eq '') {
+        print("Use: ckan-client --action file-download-url --url <url> --dir <save_dir_path>\n");
+        exit();
+    }
+
+    saveFileFromUrl($urlFile, $dir);
+}
+elsif ($action eq "resource-search-sql") {
+    my $id = '';
+    my $fields = '';
+    my $filter = '';
+    my $file = '';
+
+    for (my $i = 0; $i <= $#ARGV; $i++) {
+        if($ARGV[$i] eq "--id") {
+            $id = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--fields") {
+            $fields = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--filter") {
+            $filter = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+
+        if($ARGV[$i] eq "--file") {
+            $file = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+        }
+    }
+
+    if ($id eq '' || $fields eq '' || $filter eq '' || $file eq '') {
+        print("Use: ckan-client --action resource-search-sql --id <resource_id> --fields <fields> --filter <filter> --file <file_path>\n");
+        exit();
+    }
+
+    my $mySql = uri_escape_utf8('SELECT '.$fields.' from "'.$id.'"'.($filter ne "" ? ' WHERE '.$filter : ''));
+
+    $url = $server . "/api/action/datastore_search_sql?sql=".$mySql;
+    $curl->setopt(CURLOPT_POST, 0);
+    $curl->setopt(CURLOPT_HTTPHEADER, ['User-Agent: PERL/CURL Client']);
+}else {
+    print "Unsupported action '".$action."'\n";
+    exit;
+}
+
+if($action ne "file-download-url" && $action ne "file-upload-dir" && $action ne "file-csv-upload-path" && $action ne "datastore-create" && $action ne "datastore-insert") {
+    $curl->setopt(CURLOPT_HEADER, 1);
+    $curl->setopt(CURLOPT_VERBOSE, 0);
+    $curl->setopt(CURLOPT_NOPROGRESS, 1);
+    $curl->setopt(CURLOPT_NOBODY, 0);
+    $curl->setopt(CURLOPT_URL, $url);
+    $curl->setopt(CURLOPT_SSL_VERIFYPEER, 0);
+    $curl->setopt(CURLOPT_SSL_VERIFYHOST, 0);
+
+    my $response_body;
+    $curl->setopt(CURLOPT_WRITEDATA,\$response_body);
+
+    my $retcode = $curl->perform;
+
+    if ($retcode == 0) {
+        my $jsonObj;
+
+        try {
+            print("Transfer to CKAN ... ");
+            my $response_code = $curl->getinfo(CURLINFO_HTTP_CODE);
+            my $response = HTTP::Response->parse($response_body);
+            my $responseStr = $response->decoded_content;
+            my $jsonStr = '{}';
+            if ($responseStr =~ /{(.*)}/) {
+                my $jsonStrPart;
+                ($jsonStrPart) = $responseStr =~ /{(.*)}/;
+                ($jsonStr) = '{'.$jsonStrPart.'}';
+            }
+            else {
+                print("ERROR - NO JSON DATA\n");
+                print("RESPONSE:\n$response_body\n");
+                exit();
+            }
+
+            $jsonObj = JSON->new->utf8->decode($jsonStr);
+            my $success = $jsonObj->{success};
+            if($success == 1) {
+                print("OK\n");
+                if($action eq "dataset-create" || $action eq "file-upload-path") {
+                    print("OUTPUT: ".$jsonStr."\n");
+                }
+            }
+            else {
+                print("ERROR\n");
+                print("OUTPUT: ".$jsonStr."\n");
+                exit();
+            }
+
+        } catch {
+            warn ("Caught error: $_");
+            exit();
+        };
+
+        if ($action eq "file-download-id") {
+            my $dir = '';
+            for (my $i = 0; $i <= $#ARGV; $i++) {
+                if($ARGV[$i] eq "--dir") {
+                    $dir = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+                }
+            }
+
+            my $urlFile = $jsonObj->{result}->{url};
+            saveFileFromUrl($urlFile, $dir);
+        }
+        elsif($action eq "file-download-dataset") {
+            my $dir = '';
+            for (my $i = 0; $i <= $#ARGV; $i++) {
+                if($ARGV[$i] eq "--dir") {
+                    $dir = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+                }
+            }
+
+            foreach my $res (@{$jsonObj->{result}->{resources}}) {
+                my $urlFile = $res->{url};
+                saveFileFromUrl($urlFile, $dir);
+            }
+        }
+        elsif($action eq "file-list-dataset") {
+            foreach my $res (@{$jsonObj->{result}->{resources}}) {
+                my $urlFile = $res->{url};
+                my $nameFile = $res->{name};
+                print($nameFile." - ".$urlFile."\n");
+            }
+        }
+        elsif($action eq "file-delete-dataset") {
+            my $auth = '';
+            for (my $i = 0; $i <= $#ARGV; $i++) {
+                if($ARGV[$i] eq "--auth") {
+                    $auth = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+                }
+            }
+
+            foreach my $res (@{$jsonObj->{result}->{resources}}) {
+                my $idFile = $res->{id};
+                my $nameFile = $res->{name};
+                print("Delete file ".$nameFile." - ".$idFile."\n");
+                system($dirname.'/ckan-client --action file-delete-id --auth '.$auth.' --id '.$idFile);
+            }
+        }
+        elsif($action eq "dataset-list" || $action eq "organization-list" || $action eq "group-list" || $action eq "tag-list") {
+            foreach my $res (@{$jsonObj->{result}}) {
+                print($res."\n");
+            }
+        }
+        elsif($action eq "resource-search-sql") {
+            my $fieldName;
+            my $recValue;
+            my $fie;
+            my $rec;
+            my $strToSave = '';
+            my $savePath = '';
+
+            for (my $i = 0; $i <= $#ARGV; $i++) {
+                if($ARGV[$i] eq "--file") {
+                    $savePath = ($i + 1 <= $#ARGV ? $ARGV[$i+1] : '');
+                }
+            }
+
+            foreach $fie (@{$jsonObj->{result}->{fields}}) {
+                $fieldName = $fie->{id};
+                if($fieldName ne "_full_text") {
+                    if($strToSave eq '') {
+                        $strToSave .= (index($fieldName, ',') != -1 ? '"'.$fieldName.'"' : $fieldName);
+                    }
+                    else {
+                        $strToSave .= ','.(index($fieldName, ',') != -1 ? '"'.$fieldName.'"' : $fieldName);
+                    }
+                }
+            }
+
+            if($strToSave ne "") {
+                my($file, $dir, $ext) = fileparse($savePath);
+                my $absDirPath = File::Spec->rel2abs($dir);
+                if(!-d $absDirPath) {
+                    print("Directory ".$absDirPath." not exists, creating ... ");
+                    mkdir($absDirPath);
+                    print("OK\n");
+                }
+                
+                open(my $fh, ">" , $savePath);
+                binmode($fh, ":utf8");
+                $fh->print("$strToSave\n");
+
+
+                foreach $rec (@{$jsonObj->{result}->{records}}) {
+                    $strToSave = '';
+                    foreach $fie (@{$jsonObj->{result}->{fields}}) {
+                        $fieldName = $fie->{id};
+                        if($fieldName ne "_full_text") {
+                            $recValue = $rec->{$fieldName};
+                            
+                            if($strToSave eq '') {
+                                $strToSave .= (index($recValue, ',') != -1 ? '"'.$recValue.'"' : $recValue);
+                            }
+                            else {
+                                $strToSave .= ','.(index($recValue, ',') != -1 ? '"'.$recValue.'"' : $recValue);
+                            }
+                        }
+                    }
+                    
+                    $fh->print("$strToSave\n");
+                }
+                
+                close $fh;
+            }
+        }
+    }
+    else {
+        print("An unexpected error occurred. Code: $retcode ".$curl->strerror($retcode)." ".$curl->errbuf."\n");
+    }
+}
+
+my $endTime = time();
+my $runTime = $endTime - $startTime;
+print "Job took $runTime seconds\n";

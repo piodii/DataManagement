@@ -1,0 +1,25 @@
+#!/usr/bin/env perl
+
+# CoeGSS
+# Piotr Dzierżak pdzierzak@icis.pcz.pl PSNC
+
+use strict;
+use warnings;
+use utf8;
+use Text::Unidecode;
+use charnames ':full';
+binmode(STDOUT, ':utf8');
+use URI::Escape;
+use HTTP::Response;
+use Config::IniFiles;
+use JSON;
+use Try::Tiny;
+use File::Fetch;
+use File::Spec;
+use File::Basename;
+use Text::CSV;
+use WWW::Curl::Easy;
+use WWW::Curl::Form;
+use Switch;
+
+print "WWW::Curl Version: ".$WWW::Curl::VERSION."\n";
