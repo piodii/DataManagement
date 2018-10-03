@@ -1,4 +1,4 @@
-# COEGSS
+# CoeGSS
 # Piotr Dzierżak pdzierzak@icis.pcz.pl PSNC
 
 import socket
