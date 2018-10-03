@@ -1,0 +1,11 @@
+1. install python 2.7 libraries
+pip install requests
+pip install h5py
+
+2. Navigate to directory /usr/lib/ckan/datapusher/src/datapusher/datapusher and backup jobs.py file
+mv jobs.py jobs.py.bac
+
+3. Copy the following files jobs.py, resources.py to /usr/lib/ckan/datapusher/src/datapusher/datapusher
+
+4. restart apache service
+/etc/init.d/apache2 restart
