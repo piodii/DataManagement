@@ -1,0 +1,57 @@
+{% ckan_extends %}
+
+{# You could remove 'free extras' from the package form like this, but we keep them for this example's tests.
+  {% block custom_fields %}
+  {% endblock %}
+#}
+
+{% block package_metadata_fields %}
+    {{ form.input('scenario_id', label=_('Scenario ID'), id='field-scenario_id', placeholder=_(''), value=data.scenario_id, error=errors.scenario_id, classes=['control-medium']) }}
+
+    {{ form.input('application_id', label=_('Application ID'), id='field-application_id', placeholder=_(''), value=data.application_id, error=errors.application_id, classes=['control-medium']) }}
+
+    {{ form.input('source', label=_('Source (s)'), id='field-source', placeholder=_(''), value=data.source, error=errors.source, classes=['control-medium']) }}
+
+    <div class="control-group">
+        <label for="field-reliability_source" class="control-label">{{ _('Reliability source') }}</label>
+        <div class="controls">
+	    <select id="field-reliability_source" name="reliability_source">
+		<option value="0">-- Please select a value --</option>
+	        <option value="Survey" {% if data.get('reliability_source', 'none') == 'Survey' %} selected="selected" {% endif %}>{{ _('Survey') }}</option>
+	        <option value="Census" {% if data.get('reliability_source', 'none') == 'Census' %} selected="selected" {% endif %}>{{ _('Census') }}</option>
+	        <option value="Simulation" {% if data.get('reliability_source', 'none') == 'Simulation' %} selected="selected" {% endif %}>{{ _('Simulation') }}</option>
+	        <option value="Extrapolation" {% if data.get('reliability_source', 'none') == 'Extrapolation' %} selected="selected" {% endif %}>{{ _('Extrapolation') }}</option>
+	        <option value="Other" {% if data.get('reliability_source', 'none') == 'Other' %} selected="selected" {% endif %}>{{ _('Other') }}</option>
+	    </select>
+	</div>
+    </div>
+
+
+
+    <div class="control-group">
+        <label for="field-ex_license" class="control-label">{{ _('License') }}</label>
+        <div class="controls">
+	    <select id="field-ex_license" name="ex_license">
+		<option value="0">-- Please select a value --</option>
+		<option value="Creative Commons Attribution" {% if data.get('ex_license', 'none') == 'Creative Commons Attribution' %} selected="selected" {% endif %}>{{ _('Creative Commons Attribution') }}</option>
+		<option value="Creative Commons Attribution Share-Alike" {% if data.get('ex_license', 'none') == 'Creative Commons Attribution Share-Alike' %} selected="selected" {% endif %}>{{ _('Creative Commons Attribution Share-Alike') }}</option>
+		<option value="Creative Commons CCZero" {% if data.get('ex_license', 'none') == 'Creative Commons CCZero' %} selected="selected" {% endif %}>{{ _('Creative Commons CCZero') }}</option>
+		<option value="Creative Commons Non-Commercial (Any)" {% if data.get('ex_license', 'none') == 'Creative Commons Non-Commercial (Any)' %} selected="selected" {% endif %}>{{ _('Creative Commons Non-Commercial (Any)') }}</option>
+		<option value="GNU Free Documentation License" {% if data.get('ex_license', 'none') == 'GNU Free Documentation License' %} selected="selected" {% endif %}>{{ _('GNU Free Documentation License') }}</option>
+		<option value="License not specified" {% if data.get('ex_license', 'none') == 'License not specified' %} selected="selected" {% endif %}>{{ _('License not specified') }}</option>
+		<option value="Open Data Commons Attribution License" {% if data.get('ex_license', 'none') == 'Open Data Commons Attribution License' %} selected="selected" {% endif %}>{{ _('Open Data Commons Attribution License') }}</option>
+		<option value="Open Data Commons Open Database License (ODbL)" {% if data.get('ex_license', 'none') == 'Open Data Commons Open Database License (ODbL)' %} selected="selected" {% endif %}>{{ _('Open Data Commons Open Database License (ODbL)') }}</option>
+		<option value="Open Data Commons Public Domain Dedication and License (PDDL)" {% if data.get('ex_license', 'none') == 'Open Data Commons Public Domain Dedication and License (PDDL)' %} selected="selected" {% endif %}>{{ _('Open Data Commons Public Domain Dedication and License (PDDL)') }}</option>
+		<option value="Other (Attribution)" {% if data.get('ex_license', 'none') == 'Other (Attribution)' %} selected="selected" {% endif %}>{{ _('Other (Attribution)') }}</option>
+		<option value="Other (Non-Commercial)" {% if data.get('ex_license', 'none') == 'Other (Non-Commercial)' %} selected="selected" {% endif %}>{{ _('Other (Non-Commercial)') }}</option>
+		<option value="Other (Not Open)" {% if data.get('ex_license', 'none') == 'Other (Not Open)' %} selected="selected" {% endif %}>{{ _('Other (Not Open)') }}</option>
+		<option value="Other (Open)" {% if data.get('ex_license', 'none') == 'Other (Open)' %} selected="selected" {% endif %}>{{ _('Other (Open)') }}</option>
+		<option value="Other (Public Domain)" {% if data.get('ex_license', 'none') == 'Other (Public Domain)' %} selected="selected" {% endif %}>{{ _('Other (Public Domain)') }}</option>
+		<option value="UK Open Government Licence (OGL)" {% if data.get('ex_license', 'none') == 'UK Open Government Licence (OGL)' %} selected="selected" {% endif %}>{{ _('UK Open Government Licence (OGL)') }}</option>
+		<option value="Multiple License" {% if data.get('ex_license', 'none') == 'Multiple License' %} selected="selected" {% endif %}>{{ _('Multiple License') }}</option>
+	    </select>
+	</div>
+    </div>
+
+
+{% endblock %}

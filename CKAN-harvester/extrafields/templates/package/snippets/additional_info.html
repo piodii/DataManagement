@@ -1,0 +1,24 @@
+{% ckan_extends %}
+
+{% block extras %}
+    <tr>
+      <th scope="row" class="dataset-label">{{ _("Scenario ID") }}</th>
+      <td class="dataset-details">{{ pkg_dict.scenario_id }}</td>
+    </tr>
+    <tr>
+      <th scope="row" class="dataset-label">{{ _("Application ID") }}</th>
+      <td class="dataset-details">{{ pkg_dict.application_id }}</td>
+    </tr>
+    <tr>
+      <th scope="row" class="dataset-label">{{ _("Source (s)") }}</th>
+      <td class="dataset-details">{{ pkg_dict.source }}</td>
+    </tr>
+    <tr>
+      <th scope="row" class="dataset-label">{{ _("Reliability source") }}</th>
+      <td class="dataset-details">{{ pkg_dict.reliability_source }}</td>
+    </tr>
+    <tr>
+      <th scope="row" class="dataset-label">{{ _("License") }}</th>
+      <td class="dataset-details">{{ pkg_dict.ex_license }}</td>
+    </tr>
+{% endblock %}

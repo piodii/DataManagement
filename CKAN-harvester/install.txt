@@ -1,0 +1,15 @@
+1. Navigate to the /usr/lib/ckan/default/src/ckan/ckanext directory and copy the source directory "extrafields"
+
+2. Edit /usr/lib/ckan/default/src/ckan/setup.py and paste:
+	'ckan.plugins': [
+		....
+		'extrafields = ckanext.extrafields.plugin:MyIDatasetFormPlugin',
+    ],
+
+3. Execute commands as root:
+. /usr/lib/ckan/default/bin/activate
+cd /usr/lib/ckan/default/src/ckan
+python setup.py develop
+	
+4. restart apache service
+/etc/init.d/apache2 restart
